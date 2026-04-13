@@ -339,6 +339,81 @@ class MIMICCXRPreprocessed(Dataset):
         }
 
 
+class EmbeddingDataset(Dataset):
+    """
+    Lightweight dataset that loads pre-extracted embeddings from .pt files.
+    Designed for FL training where encoders are frozen and only the fusion
+    model is trained/federated.
+
+    Args:
+        embedding_dir: Path to directory containing .pt files and metadata.csv
+                       (output of extract_embeddings.py)
+        modality:      Which embeddings to load:
+                       "both" = image + text (default)
+                       "image" = image only
+                       "text" = text only
+                       "fused" = pre-fused embeddings
+    """
+
+    def __init__(self, embedding_dir: str, modality: str = "both"):
+        super().__init__()
+        self.embedding_dir = embedding_dir
+        self.modality = modality
+
+        # Load embeddings
+        if modality in ("both", "image"):
+            self.image_embeddings = torch.load(
+                os.path.join(embedding_dir, "image_embeddings.pt"),
+                weights_only=True,
+            )
+        if modality in ("both", "text"):
+            self.text_embeddings = torch.load(
+                os.path.join(embedding_dir, "text_embeddings.pt"),
+                weights_only=True,
+            )
+        if modality == "fused":
+            self.fused_embeddings = torch.load(
+                os.path.join(embedding_dir, "fused_embeddings.pt"),
+                weights_only=True,
+            )
+
+        # Load metadata
+        import csv
+        self.metadata = []
+        meta_path = os.path.join(embedding_dir, "metadata.csv")
+        with open(meta_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                self.metadata.append(row)
+
+        # Determine dataset size
+        if modality in ("both", "image"):
+            n = self.image_embeddings.shape[0]
+        elif modality == "text":
+            n = self.text_embeddings.shape[0]
+        else:
+            n = self.fused_embeddings.shape[0]
+
+        print(f"[EmbeddingDataset] Loaded {n} samples from {embedding_dir} "
+              f"(modality='{modality}')")
+
+    def __len__(self):
+        return len(self.metadata)
+
+    def __getitem__(self, idx):
+        sample = {"patient_id": self.metadata[idx]["patient_id"],
+                  "study_id": self.metadata[idx]["study_id"]}
+
+        if self.modality in ("both", "image"):
+            sample["image_embedding"] = self.image_embeddings[idx]
+        if self.modality in ("both", "text"):
+            sample["text_embedding"] = self.text_embeddings[idx]
+        if self.modality == "fused":
+            sample["fused_embedding"] = self.fused_embeddings[idx]
+
+        return sample
+
+
 # ---------------------------------------------------------------------------
 # Quick test
 # ---------------------------------------------------------------------------
