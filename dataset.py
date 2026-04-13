@@ -243,29 +243,132 @@ class MIMICCXRMultimodal(Dataset):
         }
 
 
+class MIMICCXRPreprocessed(Dataset):
+    """
+    Lightweight dataset that loads from preprocessed output of preprocess.py.
+    Much faster than MIMICCXRMultimodal since images are already PNG and
+    text is already extracted in manifest.csv.
+
+    Args:
+        preprocessed_dir: Path to preprocess.py output directory
+                          (contains images/ and manifest.csv)
+        tokenizer_name:   HuggingFace tokenizer name
+        max_text_len:     Maximum token length
+        image_size:       Target image size (should match preprocess.py --image_size)
+        augment:          Whether to apply training augmentations
+    """
+
+    def __init__(
+        self,
+        preprocessed_dir: str,
+        tokenizer_name: str = "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract",
+        max_text_len: int = 512,
+        image_size: int = 224,
+        augment: bool = False,
+    ):
+        super().__init__()
+        self.preprocessed_dir = preprocessed_dir
+        self.image_dir = os.path.join(preprocessed_dir, "images")
+        self.max_text_len = max_text_len
+
+        # Load manifest
+        import csv
+        self.samples = []
+        manifest_path = os.path.join(preprocessed_dir, "manifest.csv")
+        with open(manifest_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                self.samples.append(row)
+
+        # Tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        # Image transforms (images are already grayscale PNGs at target size)
+        if augment:
+            self.image_transform = transforms.Compose([
+                transforms.RandomRotation(5),
+                transforms.RandomCrop(image_size, padding=16),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ])
+        else:
+            self.image_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ])
+
+        print(f"[MIMICCXRPreprocessed] Loaded {len(self.samples)} samples "
+              f"from {manifest_path}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        row = self.samples[idx]
+
+        # --- Image ---
+        img_path = os.path.join(self.image_dir, row["image_path"])
+        image = Image.open(img_path).convert("L")
+        image_tensor = self.image_transform(image)
+
+        # --- Text ---
+        encoding = self.tokenizer(
+            row["findings_text"],
+            max_length=self.max_text_len,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        input_ids = encoding["input_ids"].squeeze(0)
+        attention_mask = encoding["attention_mask"].squeeze(0)
+
+        return {
+            "image": image_tensor,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "patient_id": row["patient_id"],
+            "study_id": row["study_id"],
+        }
+
+
 # ---------------------------------------------------------------------------
 # Quick test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = (
-        "/data/amciilab/mahfuz/mimic_cxr_dl_script/"
-        "physionet.org/files/mimic-cxr/2.0.0/files"
-    )
+    import sys
 
-    dataset = MIMICCXRMultimodal(
-        data_root=DATA_ROOT,
-        image_size=224,
-        use_clahe=True,
-        augment=False,
-        missing_findings="skip",
-    )
+    if len(sys.argv) > 1 and sys.argv[1] == "--preprocessed":
+        # Test with preprocessed data
+        dataset = MIMICCXRPreprocessed(
+            preprocessed_dir="/data/amciilab/mahfuz/mimic_cxr_preprocessed",
+            augment=False,
+        )
+    else:
+        # Test with raw DICOM data
+        DATA_ROOT = (
+            "/data/amciilab/mahfuz/mimic_cxr_dl_script/"
+            "physionet.org/files/mimic-cxr/2.0.0/files"
+        )
+        dataset = MIMICCXRMultimodal(
+            data_root=DATA_ROOT,
+            image_size=224,
+            use_clahe=True,
+            augment=False,
+            missing_findings="skip",
+        )
 
     if len(dataset) > 0:
         sample = dataset[0]
         print(f"Image shape:  {sample['image'].shape}")
         print(f"Input IDs:    {sample['input_ids'].shape}")
         print(f"Attn mask:    {sample['attention_mask'].shape}")
-        print(f"DICOM:        {sample['dcm_path']}")
-        print(f"Report:       {sample['report_path']}")
     else:
-        print("No samples found. Check data_root path.")
+        print("No samples found.")
