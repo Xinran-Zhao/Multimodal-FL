@@ -50,20 +50,32 @@ def _init_worker():
 # Image preprocessing (mirrors dataset.py logic, but saves to disk)
 # ---------------------------------------------------------------------------
 
-def load_and_preprocess_dicom(dcm_path, image_size=224, use_clahe=True):
+def load_and_preprocess_dicom(dcm_path, image_size=224, use_clahe=True,
+                              frontal_only=True):
     """
     Load a DICOM file and return a preprocessed PIL Image (grayscale, resized).
 
     Steps:
         1. Read DICOM pixel array
-        2. Handle MONOCHROME1 inversion
-        3. Normalize to 8-bit (0-255)
-        4. Apply CLAHE contrast enhancement (optional)
-        5. Resize to image_size x image_size
+        2. Filter by view position (frontal only: AP/PA)
+        3. Handle MONOCHROME1 inversion
+        4. Normalize to 8-bit (0-255)
+        5. Apply CLAHE contrast enhancement (optional)
+        6. Resize to image_size x image_size
     """
     global _pydicom, _cv2
     try:
         dcm = _pydicom.dcmread(dcm_path)
+    except Exception as e:
+        return None, str(e)
+
+    # Filter: keep only frontal views (AP or PA)
+    if frontal_only:
+        view = getattr(dcm, "ViewPosition", "").upper()
+        if view not in ("AP", "PA"):
+            return None, f"non-frontal view ({view})"
+
+    try:
         img = dcm.pixel_array.astype(np.float32)
     except Exception as e:
         return None, str(e)
@@ -158,7 +170,8 @@ def process_study(args):
     tuples, or empty list if filtered out.
     """
     (study_dir, report_path, output_image_dir,
-     image_size, use_clahe, missing_strategy, min_words, max_words) = args
+     image_size, use_clahe, missing_strategy, min_words, max_words,
+     frontal_only) = args
 
     # Extract patient_id and study_id from paths
     patient_id = os.path.basename(os.path.dirname(study_dir))
@@ -186,7 +199,8 @@ def process_study(args):
 
     for dcm_name in dcm_files:
         dcm_path = os.path.join(study_dir, dcm_name)
-        pil_img, err = load_and_preprocess_dicom(dcm_path, image_size, use_clahe)
+        pil_img, err = load_and_preprocess_dicom(dcm_path, image_size, use_clahe,
+                                                frontal_only)
 
         if pil_img is None:
             continue
@@ -322,10 +336,24 @@ def main():
         help="Maximum word count for FINDINGS section (default: 150). "
              "Filters out unusually long reports that may be outliers.",
     )
+    parser.add_argument(
+        "--frontal_only",
+        action="store_true",
+        default=True,
+        help="Keep only frontal views (AP/PA), skip lateral views (default: True).",
+    )
+    parser.add_argument(
+        "--all_views",
+        action="store_true",
+        default=False,
+        help="Include all views (frontal + lateral). Overrides --frontal_only.",
+    )
     args = parser.parse_args()
 
     if args.no_clahe:
         args.use_clahe = False
+    if args.all_views:
+        args.frontal_only = False
 
     # --- Setup output directory ---
     output_image_dir = os.path.join(args.output_dir, "images")
@@ -337,6 +365,7 @@ def main():
     print(f"CLAHE:              {args.use_clahe}")
     print(f"Missing findings:   {args.missing_findings}")
     print(f"Findings word range: [{args.min_words}, {args.max_words}]")
+    print(f"Frontal only:       {args.frontal_only}")
     print(f"Workers:            {args.num_workers}")
     print()
 
@@ -352,7 +381,7 @@ def main():
     work_items = [
         (study_dir, report_path, output_image_dir,
          args.image_size, args.use_clahe, args.missing_findings,
-         args.min_words, args.max_words)
+         args.min_words, args.max_words, args.frontal_only)
         for study_dir, report_path in all_studies
     ]
 
