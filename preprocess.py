@@ -275,7 +275,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/data/amciilab/mahfuz/mimic_cxr_preprocessed",
+        default="/data/amciilab/xinran/mimic_cxr_preprocessed",
         help="Output directory for preprocessed data",
     )
     parser.add_argument("--image_size", type=int, default=224)

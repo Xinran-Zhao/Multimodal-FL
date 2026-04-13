@@ -348,7 +348,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--preprocessed":
         # Test with preprocessed data
         dataset = MIMICCXRPreprocessed(
-            preprocessed_dir="/data/amciilab/mahfuz/mimic_cxr_preprocessed",
+            preprocessed_dir="/data/amciilab/xinran/mimic_cxr_preprocessed",
             augment=False,
         )
     else:
