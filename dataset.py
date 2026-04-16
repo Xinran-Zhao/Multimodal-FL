@@ -414,36 +414,134 @@ class EmbeddingDataset(Dataset):
         return sample
 
 
-# ---------------------------------------------------------------------------
-# Quick test
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import sys
+# =========================================================================
+# Indiana CXR Dataset for FL experiments
+# =========================================================================
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--preprocessed":
-        # Test with preprocessed data
-        dataset = MIMICCXRPreprocessed(
-            preprocessed_dir="/data/amciilab/xinran/mimic_cxr_preprocessed",
-            augment=False,
-        )
-    else:
-        # Test with raw DICOM data
-        DATA_ROOT = (
-            "/data/amciilab/mahfuz/mimic_cxr_dl_script/"
-            "physionet.org/files/mimic-cxr/2.0.0/files"
-        )
-        dataset = MIMICCXRMultimodal(
-            data_root=DATA_ROOT,
-            image_size=224,
-            use_clahe=True,
-            augment=False,
-            missing_findings="skip",
+class IndianaDataset(Dataset):
+    """
+    Indiana University CXR dataset for FL experiments.
+    Loads prepared_data.csv and returns (image, [text], labels) per sample.
+
+    Supports two modes:
+      - "image":     returns image + labels (for unimodal clients)
+      - "multimodal": returns image + text tokens + labels (for multimodal clients)
+
+    Args:
+        prepared_csv:   Path to prepared_data.csv (from data_prep.py)
+        images_dir:     Path to images_normalized/ directory
+        indices:        List of row indices to include (for FL client partitioning)
+        split:          "train", "val", or "test" — used if indices is None
+        modality:       "image" or "multimodal"
+        tokenizer_name: HuggingFace tokenizer (only loaded if modality="multimodal")
+        max_text_len:   Max token length for text
+        image_size:     Target image size
+        augment:        Training augmentations
+        label_names:    List of label column names in prepared_data.csv
+    """
+
+    def __init__(
+        self,
+        prepared_csv: str,
+        images_dir: str,
+        indices: list = None,
+        split: str = None,
+        modality: str = "image",
+        tokenizer_name: str = "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract",
+        max_text_len: int = 128,
+        image_size: int = 224,
+        augment: bool = False,
+        label_names: list = None,
+    ):
+        super().__init__()
+        import csv as csv_module
+
+        self.images_dir = images_dir
+        self.modality = modality
+        self.max_text_len = max_text_len
+        self.label_names = label_names or [
+            "No_Finding", "Cardiomegaly", "Atelectasis", "Pleural_Effusion",
+            "Opacity", "Calcinosis", "Calcified_Granuloma", "Airspace_Disease",
+        ]
+
+        # Load all rows from CSV
+        all_rows = []
+        with open(prepared_csv, "r") as f:
+            reader = csv_module.DictReader(f)
+            for row in reader:
+                all_rows.append(row)
+
+        # Select subset by indices or by split
+        if indices is not None:
+            self.samples = [all_rows[i] for i in indices]
+        elif split is not None:
+            self.samples = [r for r in all_rows if r["split"] == split]
+        else:
+            self.samples = all_rows
+
+        # Tokenizer (only for multimodal)
+        self.tokenizer = None
+        if modality == "multimodal":
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        # Image transforms
+        if augment:
+            self.image_transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.RandomRotation(5),
+                transforms.CenterCrop(230),
+                transforms.RandomCrop(image_size),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ])
+        else:
+            self.image_transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ])
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        row = self.samples[idx]
+
+        # --- Image ---
+        img_path = os.path.join(self.images_dir, row["image_path"])
+        image = Image.open(img_path).convert("RGB")
+        image_tensor = self.image_transform(image)
+
+        # --- Labels ---
+        labels = torch.tensor(
+            [int(row[name]) for name in self.label_names],
+            dtype=torch.float32,
         )
 
-    if len(dataset) > 0:
-        sample = dataset[0]
-        print(f"Image shape:  {sample['image'].shape}")
-        print(f"Input IDs:    {sample['input_ids'].shape}")
-        print(f"Attn mask:    {sample['attention_mask'].shape}")
-    else:
-        print("No samples found.")
+        result = {"image": image_tensor, "labels": labels}
+
+        # --- Text (multimodal only) ---
+        if self.modality == "multimodal" and self.tokenizer is not None:
+            text = row.get("findings_text", "")
+            if not text or text.lower() == "none":
+                text = ""
+            encoding = self.tokenizer(
+                text,
+                max_length=self.max_text_len,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            result["input_ids"] = encoding["input_ids"].squeeze(0)
+            result["attention_mask"] = encoding["attention_mask"].squeeze(0)
+
+        return result
